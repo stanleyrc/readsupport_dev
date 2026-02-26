@@ -238,6 +238,7 @@ junction.support = function(reads,
 #' @param min.bases (numeric) min aligned bases to be considered valid alignment, default 20
 #' @param min.aligned.frac (numeric) min fraction of bases in alignment that are matching, default 0.95
 #' @param new (logical) new scoring scheme, default TRUE
+#' @param extra_meta (logical) whether to keep extra metadata based on the alignment to the contig, default FALSE
 #' @param bowtie (logical) use bowtie for read alignment? requires bowtie to be callable from command line, default FALSE (use BWA)
 #' @param outdir (logical) output directory for bowtie2 temporary files
 #' @param verbose (logical) print stuff (default TRUE)
@@ -256,6 +257,7 @@ contig.support = function(reads,
                           min.bases = 20,
                           min.aligned.frac = 0.95,
                           new = TRUE,
+                          extra_meta = FALSE,
                           bowtie = FALSE,
                           outdir = "./",
                           verbose = TRUE)
@@ -264,8 +266,7 @@ contig.support = function(reads,
         stop('reads must be non empty GRanges with $qname, $cigar, $seq, and $flag fields')
 
     if (length(contig)==0)
-        stop('contigs must be non empty GRanges with $qname, $cigar and $seq fields')
-
+        stop('contigs must be non empty GRanges with $qname, $cigar and $seq fields')  
     if (verbose)
         message('Prepping reads for contig alignment')
     seq = unique(gr2dt(contig), by = c('qname'))[, structure(as.character(seq), names = as.character(qname))]
@@ -426,11 +427,10 @@ contig.support = function(reads,
     readsc$ref.aligned.frac = reads$ref.aligned.frac[readsc$ix]
     readsc$AS.og[is.na(readsc$AS.og)] = 0
     
-
     ## track sample (comment out later)
     ## tst = readsc[, .(aligned.frac, AS, AS.og, ref.aligned.frac, qname)][, sample := rdt$sample[match(qname, rdt$qname)]]
     ## tst[, .(aligned.frac, ref.aligned.frac, AS, AS.og, sample)]
-    
+    ## browser()
     ## new scoring method based on cgChain of reads to contigs
     if (new)
     {
@@ -519,12 +519,30 @@ contig.support = function(reads,
                          AS.worse == 0, ]
 
         ## keep read-specific information...
-        keepq = keepq[, .(qname, R1, contig, contig.id = as.character(contig), contig.isize, contig.strand, bases, contig.sign, AS.better, AS.worse, AS.equal)] %>% unique(by = c('qname', "R1"))
+        if(!extra_meta) {
+            keepq = keepq[, .(qname, R1, contig, contig.id = as.character(contig), contig.isize, contig.strand, bases, contig.sign, AS.better, AS.worse, AS.equal)] %>% unique(by = c('qname', "R1"))
+        } else {
+            keepq = keepq[, .(qname, R1, contig, contig.id = as.character(contig), contig.isize, contig.strand, bases, contig.sign, AS.better, AS.worse, AS.equal, contig.start, contig.end)] %>% unique(by = c('qname', "R1"))
+            ## this was in the old scoring method but I think we should keep it here so we can better understand the alignments that are being kept:
+            ov = dt2gr(readsc) %*% chunks
+            strand(ov) = readsc$strand[ov$query.id]
+            ov$subject.id = paste0('chunk', ov$subject.id)
+            ovagg = dcast.data.table(ov %>% gr2dt, qname ~ subject.id, value.var = 'width', fun.aggregate = sum)
+            ## also add the number of bases in each chunk
+            chunk.bases = gr2dt(chunks)[, .(chunk.bases = width, chunk = paste0('chunk', 1:length(chunks)))]
+            chunk.bases.wide = dcast.data.table(chunk.bases, . ~ chunk, value.var = 'chunk.bases')[, . := NULL]
+            names(chunk.bases.wide) = paste0("total_bases_", names(chunk.bases.wide))
+            ovagg = cbind(ovagg, chunk.bases.wide)
+            keepq = merge.data.table(keepq, ovagg, by = 'qname', all.x = TRUE)
+        }
+        ## keepq = keepq[, .(qname, R1, contig, contig.id = as.character(contig), contig.isize, contig.strand, bases, contig.sign, AS.better, AS.worse, AS.equal)] %>% unique(by = c('qname', "R1"))
         ## keepq = keepq[, .(qname, R1, contig, contig.isize, contig.strand, bases,
         ##                   contig.sign, AS.better, AS.worse, AS.equal)] ## %>% unique(by = c('qname', 'R1'))
     }
     else ## old scoring method
     {
+      
+        readsc[, nsplit := .N, by = .(qname, R1)] # commented out above new, adding back in
         ## if strict (default) remove any alignments that overlap others in the same qname
         if (strict)
         {
